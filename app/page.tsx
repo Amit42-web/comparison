@@ -14,28 +14,35 @@ const winnerStyles: Record<Winner, string> = {
   tie: "bg-neutral-200 text-neutral-800 ring-neutral-300",
 };
 
-const winnerLabel: Record<Winner, string> = {
-  A: "Output A wins",
-  B: "Output B wins",
-  tie: "Tie",
-};
-
 const confidenceStyles: Record<Confidence, string> = {
   high: "bg-emerald-100 text-emerald-800",
   medium: "bg-amber-100 text-amber-800",
   low: "bg-rose-100 text-rose-800",
 };
 
+/** Names that were in effect for a completed comparison. */
+interface JudgedNames {
+  a: string;
+  b: string;
+}
+
+function winnerText(winner: Winner, names: JudgedNames): string {
+  if (winner === "tie") return "Tie";
+  return `${winner === "A" ? names.a : names.b} wins`;
+}
+
 export default function Home() {
-  // Uncontrolled inputs: the (potentially huge) pasted text lives in the DOM,
-  // not React state, so pasting/typing large outputs doesn't re-render the tree
-  // or force React to reconcile the whole string on every keystroke.
+  // Uncontrolled output inputs: the (potentially huge) pasted text lives in the
+  // DOM, not React state, so pasting large outputs doesn't re-render the tree.
   const taskRef = useRef<HTMLTextAreaElement>(null);
   const outputARef = useRef<HTMLTextAreaElement>(null);
   const outputBRef = useRef<HTMLTextAreaElement>(null);
 
-  // Lightweight non-empty flags drive the button's enabled state. useState bails
-  // out when the boolean is unchanged, so most keystrokes cause zero re-renders.
+  // Editable, per-comparison display names. Small strings — controlled is fine.
+  const [nameA, setNameA] = useState("Output A");
+  const [nameB, setNameB] = useState("Output B");
+
+  // Lightweight non-empty flags drive the button's enabled state.
   const [hasTask, setHasTask] = useState(false);
   const [hasA, setHasA] = useState(false);
   const [hasB, setHasB] = useState(false);
@@ -43,6 +50,12 @@ export default function Home() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [result, setResult] = useState<CompareResponse | null>(null);
+  // Snapshot of the names used for the shown result, so editing the name inputs
+  // afterward doesn't retroactively relabel a verdict.
+  const [judgedNames, setJudgedNames] = useState<JudgedNames>({
+    a: "Output A",
+    b: "Output B",
+  });
 
   const canSubmit = !loading && hasTask && hasA && hasB;
 
@@ -53,6 +66,11 @@ export default function Home() {
     const outputA = outputARef.current?.value ?? "";
     const outputB = outputBRef.current?.value ?? "";
     if (!task.trim() || !outputA.trim() || !outputB.trim()) return;
+
+    const names: JudgedNames = {
+      a: nameA.trim() || "Output A",
+      b: nameB.trim() || "Output B",
+    };
 
     setLoading(true);
     setError(null);
@@ -72,6 +90,7 @@ export default function Home() {
         setError(data?.error || "Something went wrong. Please try again.");
         return;
       }
+      setJudgedNames(names);
       setResult(data as CompareResponse);
     } catch {
       setError("Network error. Please check your connection and try again.");
@@ -99,15 +118,17 @@ export default function Home() {
           rows={3}
         />
         <div className="grid gap-5 md:grid-cols-2">
-          <Field
-            label="Output A"
+          <OutputField
+            name={nameA}
+            onNameChange={setNameA}
             inputRef={outputARef}
             onFilledChange={setHasA}
             placeholder="Paste the first output…"
             rows={8}
           />
-          <Field
-            label="Output B"
+          <OutputField
+            name={nameB}
+            onNameChange={setNameB}
             inputRef={outputBRef}
             onFilledChange={setHasB}
             placeholder="Paste the second output…"
@@ -136,7 +157,7 @@ export default function Home() {
             <span
               className={`rounded-full px-3 py-1 text-sm font-semibold ring-1 ring-inset ${winnerStyles[result.winner]}`}
             >
-              {winnerLabel[result.winner]}
+              {winnerText(result.winner, judgedNames)}
             </span>
             <span
               className={`rounded-full px-2.5 py-1 text-xs font-medium uppercase tracking-wide ${confidenceStyles[result.confidence]}`}
@@ -176,6 +197,7 @@ export default function Home() {
   );
 }
 
+/** Plain labeled textarea (used for the task/prompt). */
 function Field({
   label,
   inputRef,
@@ -185,7 +207,6 @@ function Field({
 }: {
   label: string;
   inputRef: React.RefObject<HTMLTextAreaElement>;
-  /** Called with whether the field currently has non-whitespace content. */
   onFilledChange: (filled: boolean) => void;
   placeholder?: string;
   rows: number;
@@ -211,5 +232,50 @@ function Field({
         className="block w-full resize-y rounded-lg border border-neutral-300 bg-white px-3 py-2 text-sm text-neutral-900 shadow-sm outline-none transition placeholder:text-neutral-400 focus:border-neutral-500 focus:ring-2 focus:ring-neutral-200"
       />
     </label>
+  );
+}
+
+/** An output with an editable name box on top and its (uncontrolled) textarea. */
+function OutputField({
+  name,
+  onNameChange,
+  inputRef,
+  onFilledChange,
+  placeholder,
+  rows,
+}: {
+  name: string;
+  onNameChange: (name: string) => void;
+  inputRef: React.RefObject<HTMLTextAreaElement>;
+  onFilledChange: (filled: boolean) => void;
+  placeholder?: string;
+  rows: number;
+}) {
+  const handleChange = useCallback(
+    (e: React.ChangeEvent<HTMLTextAreaElement>) => {
+      onFilledChange(e.target.value.trim().length > 0);
+    },
+    [onFilledChange]
+  );
+
+  return (
+    <div className="block">
+      <input
+        type="text"
+        value={name}
+        onChange={(e) => onNameChange(e.target.value)}
+        placeholder="Name this output…"
+        aria-label="Output name"
+        className="mb-1.5 block w-full rounded-md border border-transparent bg-transparent px-1 py-0.5 text-sm font-medium text-neutral-800 outline-none transition hover:border-neutral-200 focus:border-neutral-300 focus:bg-white focus:ring-2 focus:ring-neutral-200"
+      />
+      <textarea
+        ref={inputRef}
+        defaultValue=""
+        onChange={handleChange}
+        placeholder={placeholder}
+        rows={rows}
+        className="block w-full resize-y rounded-lg border border-neutral-300 bg-white px-3 py-2 text-sm text-neutral-900 shadow-sm outline-none transition placeholder:text-neutral-400 focus:border-neutral-500 focus:ring-2 focus:ring-neutral-200"
+      />
+    </div>
   );
 }
