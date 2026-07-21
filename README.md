@@ -16,16 +16,18 @@ The `/api/compare` route implements a **bias-mitigated single-prompt judge**:
 4. If the passes disagree, a neutral **tie-breaking** pass runs and the response
    is flagged `inconsistent: true`, which the UI surfaces as a "close call" note.
 
-The judge uses Anthropic's tool-use mode to guarantee a valid structured
-verdict, with one automatic retry on any parse/validation failure. The model
-call sits behind a `JudgeModel` interface (`lib/judge.ts`) so another provider
-(OpenAI, etc.) can be swapped in without touching the API route.
+The judge uses the provider's strict tool/function-calling mode to guarantee a
+valid structured verdict, with one automatic retry on any parse/validation
+failure. The model call sits behind a `JudgeModel` interface (`lib/judge.ts`),
+so providers can be swapped without touching the API route. **OpenAI is the
+default**; set `JUDGE_PROVIDER=anthropic` to use Claude instead.
 
 ## Stack
 
 - Next.js 14 (App Router) + TypeScript
 - Tailwind CSS
-- `@anthropic-ai/sdk` for the default judge model
+- `openai` for the default judge model (`@anthropic-ai/sdk` available as an
+  alternative provider)
 
 ## Setup
 
@@ -35,11 +37,11 @@ call sits behind a `JudgeModel` interface (`lib/judge.ts`) so another provider
    npm install
    ```
 
-2. Create `.env.local` from the example and add your Anthropic API key:
+2. Create `.env.local` from the example and add your OpenAI API key:
 
    ```bash
    cp .env.example .env.local
-   # then edit .env.local and set ANTHROPIC_API_KEY
+   # then edit .env.local and set OPENAI_API_KEY
    ```
 
 3. Run the dev server:
@@ -76,17 +78,20 @@ Expected response shape:
 
 ## Environment variables
 
-| Variable            | Required | Description                                        |
-| ------------------- | -------- | -------------------------------------------------- |
-| `ANTHROPIC_API_KEY` | yes      | Anthropic API key used by the judge model.         |
-| `JUDGE_MODEL`       | no       | Override the default judge model id.               |
+| Variable            | Required             | Description                                                        |
+| ------------------- | -------------------- | ----------------------------------------------------------------- |
+| `OPENAI_API_KEY`    | yes (default)        | OpenAI API key used by the default judge model.                   |
+| `JUDGE_PROVIDER`    | no                   | `openai` (default) or `anthropic`.                                |
+| `ANTHROPIC_API_KEY` | if provider=anthropic | Anthropic API key, used when `JUDGE_PROVIDER=anthropic`.          |
+| `JUDGE_MODEL`       | no                   | Override the judge model id (default `gpt-4o` / `claude-sonnet-4-5`). |
 
 ## Deploying to Vercel
 
 1. Push this repo to GitHub.
 2. In [Vercel](https://vercel.com/new), import the repository.
-3. Add the `ANTHROPIC_API_KEY` environment variable in **Project Settings →
-   Environment Variables**.
+3. Add the `OPENAI_API_KEY` environment variable in **Project Settings →
+   Environment Variables** (plus `JUDGE_PROVIDER`/`ANTHROPIC_API_KEY` if you
+   want to use Claude instead).
 4. Deploy. Vercel auto-detects Next.js — no extra configuration needed.
 
 > The `/api/compare` route is allowed up to 60s (`maxDuration`) to accommodate

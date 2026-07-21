@@ -1,4 +1,5 @@
 import Anthropic from "@anthropic-ai/sdk";
+import OpenAI from "openai";
 import type { JudgeVerdict } from "./types";
 
 /**
@@ -56,8 +57,8 @@ export interface JudgeInput {
 }
 
 /**
- * Abstraction over "call a model and get a structured verdict back". Swap in
- * an OpenAI / other implementation later without touching the API route.
+ * Abstraction over "call a model and get a structured verdict back". Swap
+ * providers (OpenAI, Anthropic, …) without touching the API route.
  */
 export interface JudgeModel {
   /** Human-readable id of the model this instance judges with. */
@@ -65,31 +66,25 @@ export interface JudgeModel {
   judge(input: JudgeInput): Promise<JudgeVerdict>;
 }
 
-const DEFAULT_MODEL = process.env.JUDGE_MODEL || "claude-sonnet-4-5";
-
-/** The tool schema we force the model to fill — guarantees valid JSON. */
-const VERDICT_TOOL: Anthropic.Tool = {
-  name: "report_verdict",
-  description:
-    "Report the structured evaluation verdict comparing OUTPUT A and OUTPUT B.",
-  input_schema: {
-    type: "object",
-    properties: {
-      reasoning: {
-        type: "string",
-        description:
-          "2-4 sentences comparing A and B on the evaluation dimensions, citing specific differences.",
-      },
-      winner: { type: "string", enum: ["A", "B", "tie"] },
-      confidence: { type: "string", enum: ["high", "medium", "low"] },
-      key_differentiator: {
-        type: "string",
-        description: "One short phrase naming the single biggest deciding factor.",
-      },
+/** JSON-schema description of the verdict — reused across providers. */
+const VERDICT_SCHEMA = {
+  type: "object",
+  properties: {
+    reasoning: {
+      type: "string",
+      description:
+        "2-4 sentences comparing A and B on the evaluation dimensions, citing specific differences.",
     },
-    required: ["reasoning", "winner", "confidence", "key_differentiator"],
+    winner: { type: "string", enum: ["A", "B", "tie"] },
+    confidence: { type: "string", enum: ["high", "medium", "low"] },
+    key_differentiator: {
+      type: "string",
+      description: "One short phrase naming the single biggest deciding factor.",
+    },
   },
-};
+  required: ["reasoning", "winner", "confidence", "key_differentiator"],
+  additionalProperties: false,
+} as const;
 
 function buildPrompt(input: JudgeInput): string {
   let prompt = JUDGE_PROMPT.replace("{{task}}", input.task)
@@ -114,12 +109,94 @@ function isVerdict(value: unknown): value is JudgeVerdict {
   );
 }
 
+/**
+ * Wraps a single-attempt call with one retry: if the model returns something
+ * we can't validate, try once more before surfacing an error.
+ */
+async function withRetry(
+  callOnce: () => Promise<JudgeVerdict>
+): Promise<JudgeVerdict> {
+  let lastErr: unknown;
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      return await callOnce();
+    } catch (err) {
+      lastErr = err;
+    }
+  }
+  throw new Error(
+    `Judge failed to return a valid verdict: ${
+      lastErr instanceof Error ? lastErr.message : String(lastErr)
+    }`
+  );
+}
+
+/**
+ * OpenAI-backed judge (default). Uses strict function-calling so the model is
+ * forced to return JSON matching the verdict schema.
+ */
+export class OpenAIJudge implements JudgeModel {
+  readonly modelId: string;
+  private client: OpenAI;
+
+  constructor(modelId: string = process.env.JUDGE_MODEL || "gpt-4o") {
+    const apiKey = process.env.OPENAI_API_KEY;
+    if (!apiKey) {
+      throw new Error("OPENAI_API_KEY is not set");
+    }
+    this.client = new OpenAI({ apiKey });
+    this.modelId = modelId;
+  }
+
+  judge(input: JudgeInput): Promise<JudgeVerdict> {
+    return withRetry(() => this.callOnce(input));
+  }
+
+  private async callOnce(input: JudgeInput): Promise<JudgeVerdict> {
+    const completion = await this.client.chat.completions.create({
+      model: this.modelId,
+      messages: [{ role: "user", content: buildPrompt(input) }],
+      tools: [
+        {
+          type: "function",
+          function: {
+            name: "report_verdict",
+            description:
+              "Report the structured evaluation verdict comparing OUTPUT A and OUTPUT B.",
+            parameters: VERDICT_SCHEMA as unknown as Record<string, unknown>,
+            strict: true,
+          },
+        },
+      ],
+      tool_choice: {
+        type: "function",
+        function: { name: "report_verdict" },
+      },
+    });
+
+    const call = completion.choices[0]?.message?.tool_calls?.[0];
+    if (!call || call.type !== "function") {
+      throw new Error("Model did not return a function call");
+    }
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(call.function.arguments);
+    } catch {
+      throw new Error("Verdict arguments were not valid JSON");
+    }
+    if (!isVerdict(parsed)) {
+      throw new Error("Verdict did not match the expected schema");
+    }
+    return parsed;
+  }
+}
+
 /** Anthropic-backed judge. Uses tool-use to force a valid structured verdict. */
 export class AnthropicJudge implements JudgeModel {
   readonly modelId: string;
   private client: Anthropic;
 
-  constructor(modelId: string = DEFAULT_MODEL) {
+  constructor(modelId: string = process.env.JUDGE_MODEL || "claude-sonnet-4-5") {
     const apiKey = process.env.ANTHROPIC_API_KEY;
     if (!apiKey) {
       throw new Error("ANTHROPIC_API_KEY is not set");
@@ -128,30 +205,23 @@ export class AnthropicJudge implements JudgeModel {
     this.modelId = modelId;
   }
 
-  async judge(input: JudgeInput): Promise<JudgeVerdict> {
-    // One retry: if the model somehow returns something we can't validate,
-    // try once more before surfacing an error.
-    let lastErr: unknown;
-    for (let attempt = 0; attempt < 2; attempt++) {
-      try {
-        return await this.callOnce(input);
-      } catch (err) {
-        lastErr = err;
-      }
-    }
-    throw new Error(
-      `Judge failed to return a valid verdict: ${
-        lastErr instanceof Error ? lastErr.message : String(lastErr)
-      }`
-    );
+  judge(input: JudgeInput): Promise<JudgeVerdict> {
+    return withRetry(() => this.callOnce(input));
   }
 
   private async callOnce(input: JudgeInput): Promise<JudgeVerdict> {
     const message = await this.client.messages.create({
       model: this.modelId,
       max_tokens: 1024,
-      tools: [VERDICT_TOOL],
-      tool_choice: { type: "tool", name: VERDICT_TOOL.name },
+      tools: [
+        {
+          name: "report_verdict",
+          description:
+            "Report the structured evaluation verdict comparing OUTPUT A and OUTPUT B.",
+          input_schema: VERDICT_SCHEMA as unknown as Anthropic.Tool.InputSchema,
+        },
+      ],
+      tool_choice: { type: "tool", name: "report_verdict" },
       messages: [{ role: "user", content: buildPrompt(input) }],
     });
 
@@ -168,7 +238,14 @@ export class AnthropicJudge implements JudgeModel {
   }
 }
 
-/** Factory so the route doesn't hardcode a provider. */
+/**
+ * Factory so the route doesn't hardcode a provider. Defaults to OpenAI; set
+ * JUDGE_PROVIDER=anthropic to use Claude instead.
+ */
 export function createJudge(modelId?: string): JudgeModel {
-  return new AnthropicJudge(modelId);
+  const provider = (process.env.JUDGE_PROVIDER || "openai").toLowerCase();
+  if (provider === "anthropic") {
+    return new AnthropicJudge(modelId);
+  }
+  return new OpenAIJudge(modelId);
 }
