@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useCallback, useRef, useState } from "react";
 import type {
   CompareRequest,
   CompareResponse,
@@ -27,18 +27,33 @@ const confidenceStyles: Record<Confidence, string> = {
 };
 
 export default function Home() {
-  const [task, setTask] = useState("");
-  const [outputA, setOutputA] = useState("");
-  const [outputB, setOutputB] = useState("");
+  // Uncontrolled inputs: the (potentially huge) pasted text lives in the DOM,
+  // not React state, so pasting/typing large outputs doesn't re-render the tree
+  // or force React to reconcile the whole string on every keystroke.
+  const taskRef = useRef<HTMLTextAreaElement>(null);
+  const outputARef = useRef<HTMLTextAreaElement>(null);
+  const outputBRef = useRef<HTMLTextAreaElement>(null);
+
+  // Lightweight non-empty flags drive the button's enabled state. useState bails
+  // out when the boolean is unchanged, so most keystrokes cause zero re-renders.
+  const [hasTask, setHasTask] = useState(false);
+  const [hasA, setHasA] = useState(false);
+  const [hasB, setHasB] = useState(false);
+
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [result, setResult] = useState<CompareResponse | null>(null);
 
-  const canSubmit =
-    !loading && task.trim() && outputA.trim() && outputB.trim();
+  const canSubmit = !loading && hasTask && hasA && hasB;
 
   async function handleCompare() {
-    if (!canSubmit || loading) return; // loading-lock: no double submit
+    if (loading) return; // loading-lock: no double submit
+
+    const task = taskRef.current?.value ?? "";
+    const outputA = outputARef.current?.value ?? "";
+    const outputB = outputBRef.current?.value ?? "";
+    if (!task.trim() || !outputA.trim() || !outputB.trim()) return;
+
     setLoading(true);
     setError(null);
     setResult(null);
@@ -78,23 +93,23 @@ export default function Home() {
       <div className="space-y-5">
         <Field
           label="Task / Prompt given to both models"
-          value={task}
-          onChange={setTask}
+          inputRef={taskRef}
+          onFilledChange={setHasTask}
           placeholder="e.g. Summarize this article in three bullet points…"
           rows={3}
         />
         <div className="grid gap-5 md:grid-cols-2">
           <Field
             label="Output A"
-            value={outputA}
-            onChange={setOutputA}
+            inputRef={outputARef}
+            onFilledChange={setHasA}
             placeholder="Paste the first output…"
             rows={8}
           />
           <Field
             label="Output B"
-            value={outputB}
-            onChange={setOutputB}
+            inputRef={outputBRef}
+            onFilledChange={setHasB}
             placeholder="Paste the second output…"
             rows={8}
           />
@@ -163,25 +178,34 @@ export default function Home() {
 
 function Field({
   label,
-  value,
-  onChange,
+  inputRef,
+  onFilledChange,
   placeholder,
   rows,
 }: {
   label: string;
-  value: string;
-  onChange: (v: string) => void;
+  inputRef: React.RefObject<HTMLTextAreaElement>;
+  /** Called with whether the field currently has non-whitespace content. */
+  onFilledChange: (filled: boolean) => void;
   placeholder?: string;
   rows: number;
 }) {
+  const handleChange = useCallback(
+    (e: React.ChangeEvent<HTMLTextAreaElement>) => {
+      onFilledChange(e.target.value.trim().length > 0);
+    },
+    [onFilledChange]
+  );
+
   return (
     <label className="block">
       <span className="mb-1.5 block text-sm font-medium text-neutral-700">
         {label}
       </span>
       <textarea
-        value={value}
-        onChange={(e) => onChange(e.target.value)}
+        ref={inputRef}
+        defaultValue=""
+        onChange={handleChange}
         placeholder={placeholder}
         rows={rows}
         className="block w-full resize-y rounded-lg border border-neutral-300 bg-white px-3 py-2 text-sm text-neutral-900 shadow-sm outline-none transition placeholder:text-neutral-400 focus:border-neutral-500 focus:ring-2 focus:ring-neutral-200"
